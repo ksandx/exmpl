@@ -1,0 +1,421 @@
+using System;
+using System.Linq;
+using System.Collections.Generic;
+using TSLab.Script.Handlers;
+using TSLab.Script.Optimization;
+using TSLab.Script;
+
+namespace WealthLab_ToTSLab
+{
+    public class TwoSider_timeNewSet : IExternalScript2
+    {
+        public OptimProperty _spStep = new OptimProperty(100, 50, 350, 50);
+        public OptimProperty _kTP = new OptimProperty(1, 1, 10, 1);
+        public OptimProperty _lev_podv = new OptimProperty(200, 50, 350, 50);
+        public OptimProperty _otstup = new OptimProperty(150, 50, 350, 50);
+        public OptimProperty _Stop = new OptimProperty(5000, 1000, 35000, 100);
+        public OptimProperty _Take = new OptimProperty(5000, 1000, 35000, 100);
+
+        public OptimProperty _isRi = new OptimProperty(1, 0, 1, 1);
+        public OptimProperty ShowDopInfo = new OptimProperty(0, 0, 1, 1);
+        public OptimProperty ShowProfitPane = new OptimProperty(0, 0, 1, 1);
+        public OptimProperty CloseTime = new OptimProperty(0, 0, 1, 1);
+
+        public OptimProperty _lot = new OptimProperty(10, 1, 10, 1);
+
+        public OptimProperty _hourMinute = new OptimProperty(1800, 0, 2359, 1);
+
+        public void Execute(IContext ctx, ISecurity sec, ISecurity sec2)
+        {
+            string timestr = _hourMinute.ToString();
+            if (timestr.Length < 4)
+                timestr = "0" + timestr;
+
+            int hour = int.Parse(timestr[0].ToString() + timestr[1].ToString());
+            int minute = int.Parse(timestr[2].ToString() + timestr[3].ToString());
+
+            var stop = _Stop.Value;
+            var take = _Take.Value;
+            var spStep = _spStep.Value;
+            var lev_podv = _lev_podv.Value;
+            var otstup = _otstup.Value;
+            var tp = _kTP.Value;
+            int count = sec.Bars.Count();
+            IList<double> sumPos = new List<double>();
+            sumPos.Add(0);
+            IList<double> posL = new List<double>();
+            posL.Add(0);
+            IList<double> posS = new List<double>();
+            posS.Add(0);
+            //paritets
+            IList<double> parL = new List<double>();
+            parL.Add(sec.ClosePrices[0]);
+            IList<double> parS = new List<double>();
+            parS.Add(sec.ClosePrices[0]);
+                       
+            double paritetL = 0;
+            double paritetS = 0;
+
+            string[] keylistLevelsL;
+            string[] keylistLevelsS;
+
+            IList<double> upLevels = new List<double>();
+            IList<double> dnLevels = new List<double>();
+            bool expirationDay;
+            DateTime[] expirationDays =
+                {
+                DateTime.Parse("06.03.2009"),                DateTime.Parse("09.06.2009"),
+                DateTime.Parse("09.09.2009"),                DateTime.Parse("09.12.2009"),
+                DateTime.Parse("09.03.2010"),                DateTime.Parse("09.06.2010"),
+                DateTime.Parse("09.09.2010"),                DateTime.Parse("09.12.2010"),
+                DateTime.Parse("09.03.2011"),                DateTime.Parse("09.06.2011"),
+                DateTime.Parse("09.09.2011"),                DateTime.Parse("09.12.2011"),
+                DateTime.Parse("07.03.2012"),                DateTime.Parse("09.06.2012"),
+                DateTime.Parse("07.09.2012"),                DateTime.Parse("07.12.2012"),
+                DateTime.Parse("07.03.2013"),                DateTime.Parse("07.06.2013"),
+                DateTime.Parse("09.09.2013"),                DateTime.Parse("09.12.2013"),
+                DateTime.Parse("07.03.2014"),                DateTime.Parse("10.06.2014"),
+                DateTime.Parse("09.09.2014"),                DateTime.Parse("09.12.2014"),
+                DateTime.Parse("06.03.2015"),DateTime.Parse("10.03.2015"),                DateTime.Parse("09.06.2015"),
+                DateTime.Parse("09.09.2015"),                DateTime.Parse("09.12.2015"),
+                DateTime.Parse("09.03.2016"),                DateTime.Parse("09.06.2016"),
+                };
+            bool isClap = true;
+
+            bool isTime = true;
+            bool isTime2 = false;
+bool isSaveProfit = false;
+
+            double maxprofit = 0;
+            var pnlpos = new double[count];
+            var closedEquity = new double[count];
+            var equity = new double[count];
+            //var dd = new double[count];
+            var pnlofday = new double[count];
+            
+            var startBalance = 0.0;
+            int startBar = 0;
+            for (int i = 1; i < count; i++)
+            {
+            var lot = _isRi.Value > 0 ? Math.Round(_lot.Value * sec2.ClosePrices[i]/50000, 2) : _lot.Value;
+			 
+                var midBar = (sec.HighPrices[i] + sec.LowPrices[i]) / 2;// sec.ClosePrices[i];//
+                expirationDay = false;
+                foreach (DateTime date in expirationDays)
+                {
+                    expirationDay = date.ToShortDateString() == sec.Bars[i].Date.ToShortDateString();
+                    if (expirationDay)
+                        break;
+                }
+
+                if (sec.Bars[i].Date.Hour == 10 && sec.Bars[i].Date.Minute == 1)
+                {
+                    isTime = false;
+                    isTime2 = false;
+					startBar = i-1;
+                }
+                var longpos = sec.Positions.Where(p => p.IsActive && p.IsLong && p.EntryBarNum <= i);
+                var shortpos = sec.Positions.Where(p => p.IsActive && p.IsShort && p.EntryBarNum <= i);
+                var actpos = sec.Positions.Where(p => p.IsActive && p.EntryBarNum <= i);
+
+                int lpc = longpos.Count();
+                int spc = shortpos.Count();
+
+                sumPos.Add(lpc - spc);
+                posL.Add(lpc);
+                posS.Add(-spc);
+                startBalance = equity[startBar];
+
+                pnlpos[i] = PnLpos(sec, i, lot);
+                closedEquity[i] = ClosedEquity(sec, i);
+                equity[i] = closedEquity[i] + pnlpos[i];
+                //dd[i] = DD(equity, i);
+                pnlofday[i] = PnLOfDay(startBalance, equity[i]);
+
+                #region расчет среднего уровня(медиана сетки)
+				
+				if(isTime2)
+				{					
+                    paritetL = parL[i - 1];
+                    paritetS = parS[i - 1];
+				}
+                if (isTime)
+                {
+                    paritetL = midBar;
+                    paritetS = midBar;
+                    //isClap = false;
+					maxprofit = 0;
+                }
+				else if (isClap)
+                {
+                    paritetL = (sec.HighPrices[i] + sec.LowPrices[i]) / 2;//sec.ClosePrices[i-1];
+                    paritetS = (sec.HighPrices[i] + sec.LowPrices[i]) / 2;//sec.ClosePrices[i-1];
+                    isClap = false;
+					maxprofit = 0;
+                }
+				
+                else
+                {
+                    bool accesL = midBar - (paritetL - otstup) > lev_podv + spStep;
+                    bool accesS = (paritetS + otstup) - midBar > lev_podv + spStep;
+
+                    paritetL = lpc == 0 ? accesL ? Math.Max(midBar, parL[i - 1]) : parL[i - 1] : parL[i - 1];
+                    paritetS = spc == 0 ? accesS ? Math.Min(midBar, parS[i - 1]) : parS[i - 1] : parS[i - 1];
+					// if (sec.Bars[i].Date.Hour == 10 && sec.Bars[i].Date.Minute == 0)
+					// {
+						// if(lpc==0)
+						// paritetL = midBar;
+						// if(spc == 0)
+						// paritetS = midBar;
+					// }
+                }
+
+                parL.Add(paritetL);
+                parS.Add(paritetS);
+
+                #endregion
+
+				if (isSaveProfit)
+                {
+                    maxprofit = pnlofday[i] > maxprofit ? pnlofday[i] : maxprofit;
+                    if (maxprofit - pnlofday[i] >= Math.Round(maxprofit / 3, 2))
+                    {
+                        foreach (IPosition p in actpos)
+                        {
+                            p.CloseAtMarket(i + 1, "Trail_" + p.EntrySignalName);
+                        }
+                        isTime = true;
+                        isSaveProfit = false;
+                    }
+                }
+				
+                if (pnlofday[i] <= stop*(-1))
+                {
+                    foreach (IPosition p in actpos)
+                    {
+                        p.CloseAtMarket(i + 1, "Stop_" + p.EntrySignalName);
+                    }
+                    isTime = true;
+                }
+                else if (pnlofday[i] >= take)
+                {
+					isSaveProfit = true;
+                    // foreach (IPosition p in actpos)
+                    // {
+                        // p.CloseAtMarket(i + 1, "Take_" + p.EntrySignalName);
+                    // }
+                    // isTime = true;
+                }
+
+                isClap = sumPos[i] >= 0 && sumPos[i - 1] < 0 || sumPos[i] <= 0 && sumPos[i - 1] > 0;
+                if (isClap)
+                {
+                    foreach (IPosition p in actpos)
+                    {
+                                //var price = sec.ClosePrices[i];
+                                //.CloseAtStop(i+1, price, "clap_" + p.EntrySignalName);
+                        p.CloseAtMarket(i + 1, "clap_" + p.EntrySignalName);
+                    }
+                    //continue;
+                }
+                
+                // exit time
+                if (sec.Bars[i].Date.Hour == hour && sec.Bars[i].Date.Minute >= minute || sec.Bars[i].Date.Hour > hour)
+                {
+                    isTime2 = true;
+					if(CloseTime.Value > 0)
+					{
+						foreach (IPosition p in actpos)
+						{
+							p.CloseAtMarket(i + 1, "time_" + p.EntrySignalName);
+						}
+						isTime = true;
+                    isTime2 = false;
+					}
+                }
+                else if (!isTime && !isTime2 && !isClap)// && sec.Bars[i].Date.Hour == hour && sec.Bars[i].Date.Minute <= minute || sec.Bars[i].Date.Hour < hour)
+                {
+                    #region списки уровней
+
+                    //список цен для шортов
+                    keylistLevelsS = new[]
+                    {
+                    paritetS.ToString(),
+                    spStep.ToString(),
+                    otstup.ToString()
+                    };
+
+                    upLevels = ctx.GetData("upLevels", keylistLevelsS, () =>
+                    {
+                        IList<double> lv = new List<double>();
+                        var x = paritetS + otstup;
+                        while (x <= paritetS + 0.2 * paritetS)// подумать до скольки ограничивать сетку
+                        {
+                            lv.Add(x);
+                            x += spStep;
+                        }
+
+                        return lv;
+                    });
+
+                    //список цен для лонгов
+                    keylistLevelsL = new[]
+                    {
+                    paritetL.ToString(),
+                    spStep.ToString(),
+                    otstup.ToString()
+                    };
+
+                    dnLevels = ctx.GetData("dnLevels", keylistLevelsL, () =>
+                    {
+                        IList<double> lv = new List<double>();
+                        var x = paritetL - otstup;
+                        while (x >= paritetL - 0.2 * paritetL)// подумать до скольки ограничивать сетку
+                        {
+                            lv.Add(x);
+                            x -= spStep;
+                        }
+
+                        return lv;
+                    });
+                    #endregion
+                    if (!expirationDay)
+                    {
+                        // верхние уровни для шортов
+                        for (int level = 0; level < upLevels.Count; level++)
+                        {
+                            var sig = "SE" + (level + 1);
+                            var se = sec.Positions.GetLastActiveForSignal(sig, i);
+                            if (se == null)
+                            {
+                                var price = upLevels[level];
+                                sec.Positions.SellAtPrice(i + 1, lot, price, sig);
+                            }
+                            else
+                                se.CloseAtPrice(i + 1, upLevels[level] - spStep * tp, "x" + sig);
+                        }
+
+                        // нижние уровни для лонгов
+                        for (int level = 0; level < dnLevels.Count; level++)
+                        {
+                            var sig = "LE" + (level + 1);
+                            var le = sec.Positions.GetLastActiveForSignal(sig, i);
+                            if (le == null)
+                            {
+                                var price = dnLevels[level];
+                                sec.Positions.BuyAtPrice(i + 1, lot, price, sig);
+                            }
+                            else
+                                le.CloseAtPrice(i + 1, dnLevels[level] + spStep * tp, "x" + sig);
+                        }
+                    }
+                }
+            }
+            if (ctx.IsOptimization)
+                return;
+            #region Visualisation
+            IPane pane = null;
+            IGraphList gl = null;
+            pane = ctx.CreatePane("Main", 80, false);
+            pane.UpdatePrecision(PaneSides.RIGHT, sec.Decimals);
+            pane.AddList(sec.ToString(), sec, CandleStyles.BAR_CANDLE, true, 0x00ff00, PaneSides.RIGHT);
+            if (ShowDopInfo.Value > 0)
+            {
+                double[] parl2 = new double[count];
+                double[] pars2 = new double[count];
+                for (int i = 0; i < count; i++)
+                {
+                    parl2[i] = parL[i] - otstup;
+                    pars2[i] = parS[i] + otstup;
+                }
+                gl = pane.AddList("paritetL", parL, ListStyles.LINE, 0x0000ff, LineStyles.SOLID, PaneSides.RIGHT);
+                gl.Thickness = 1;
+                gl = pane.AddList("paritetS", parS, ListStyles.LINE, 0xff0000, LineStyles.SOLID, PaneSides.RIGHT);
+                gl.Thickness = 1;
+                gl = pane.AddList("1st long", parl2, ListStyles.LINE, 0x0000ff, LineStyles.DASH_DOT, PaneSides.RIGHT);
+                gl.Thickness = 1;
+                gl = pane.AddList("1st short", pars2, ListStyles.LINE, 0xff0000, LineStyles.DASH_DOT, PaneSides.RIGHT);
+                gl.Thickness = 1;
+                //countPos
+                pane = ctx.CreatePane("summ position", 20, false);
+                gl = pane.AddList("PosSum", sumPos, ListStyles.LINE, 0x0000ff, LineStyles.SOLID, PaneSides.RIGHT);
+                gl.Thickness = 3;
+                
+                //var z = Enumerable.Repeat(0, count).ToArray();
+                //gl = pane.AddList("", z, ListStyles.LINE, 0xff00ff, LineStyles.SOLID, PaneSides.RIGHT);
+
+                //gl = pane.AddList("Long", posL, ListStyles.LINE, 0x00ff00, LineStyles.SOLID, PaneSides.RIGHT);
+                //gl.Thickness = 2;
+                //gl = pane.AddList("Short", posS, ListStyles.LINE, 0xff0000, LineStyles.SOLID, PaneSides.RIGHT);
+                //gl.Thickness = 2;
+            }
+            if (ShowProfitPane.Value > 0)
+            {
+                pane = ctx.CreatePane("pnl_actpos pane", 15, false);
+                gl = pane.AddList("pnl_actpos", pnlpos, ListStyles.LINE, 0xff0000, LineStyles.SOLID, PaneSides.RIGHT);
+                gl.Thickness = 3;
+                gl = pane.AddList("pnl_of_Day", pnlofday, ListStyles.LINE, 0x000000, LineStyles.SOLID, PaneSides.RIGHT);
+                gl.Thickness = 3;
+                gl = pane.AddList("Тейк", Enumerable.Repeat(take, count).ToArray(), ListStyles.LINE, 0xff00ff, LineStyles.SOLID, PaneSides.RIGHT);
+                gl = pane.AddList("Stop", Enumerable.Repeat(stop*(-1), count).ToArray(), ListStyles.LINE, 0xff00ff, LineStyles.SOLID, PaneSides.RIGHT);
+
+                pane = ctx.CreatePane("equity pane", 25, false);
+                gl = pane.AddList("ClosedEquity", closedEquity, ListStyles.LINE, 0x20ff15, LineStyles.SOLID, PaneSides.RIGHT);
+                gl.Thickness = 3;
+                gl = pane.AddList("Equity", equity, ListStyles.LINE, 0x0000ff, LineStyles.SOLID, PaneSides.RIGHT);
+                gl.Thickness = 3;
+
+                //pane = ctx.CreatePane("DD pane", 15, false);
+                //gl = pane.AddList("DD", dd, ListStyles.LINE, 0x000000, LineStyles.SOLID, PaneSides.RIGHT);
+                //gl.Thickness = 3;
+            }
+            #endregion
+        }
+
+        // pnl active positions
+        private double PnLpos(ISecurity sec, int bar, double lot)
+        {
+            var actpos = sec.Positions.GetActiveForBar(bar);
+
+            double res = 0;
+
+            foreach (IPosition p in actpos)
+            {
+                res += p.OpenProfit(bar) * lot;// профит по открытым позициям
+            }
+
+            return res;
+        }
+        // equity for closed positions
+        private double ClosedEquity(ISecurity sec, int bar)
+        {
+            double res = 0;
+            IEnumerable<IPosition> pos = sec.Positions.GetClosedForBar(bar);
+
+            foreach (IPosition p in pos)
+            {
+                res += p.Profit(); // профит по закрытым позициям
+            }
+            return res;
+        }
+
+        // DrawDown of Highest equity
+        private double DD(double[] equity, int bar)
+        {
+            double res = 0;
+            double maxEquity = 0;
+
+            for (int i = 0; i < bar; i++)
+            {
+                maxEquity = maxEquity > equity[i] ? maxEquity : equity[i];
+            }
+            res = Math.Min( equity[bar] - maxEquity, 0);
+            return res;
+        }
+
+        private double PnLOfDay(double stCap, double equity)
+        {
+            return equity - stCap;
+        }
+    }
+}
